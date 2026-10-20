@@ -295,7 +295,7 @@ export default {
 
           await ctx.session.synthetic({
             sessionID: input.session,
-            description: `intercom 来自 ${basename(self?.location?.directory ?? "?")}/${context.agent}`,
+            description: `intercom 来自「${self?.title ?? "?"}」(${basename(self?.location?.directory ?? "?")}/${context.agent})`,
             delivery,
             resume: true,
             text: envelope(self, context, input.text),
