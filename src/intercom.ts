@@ -6,6 +6,8 @@
  *   - 工具走 Code Mode(codemode: true):不进每个会话的常驻工具目录,
  *     模型需要时通过 execute 检索调用,不用时几乎零上下文占用
  *   - 单文件、无 TUI、无线程存储、零依赖
+ *   - 用户入口是斜杠命令 /ask 与 /sessions:纯人工输入才会触发,
+ *     agent 的工具目录里没有命令,物理上无法误触发
  *
  * 消息机制(参考并精简自 jmfirth/opencode-messaging,MIT):
  *   - 读:HTTP 调本机 OpenCode 服务的只读接口(会话列表 / 消息历史)
@@ -59,10 +61,28 @@ interface ToolDraft {
   }): void
 }
 
+interface CommandInvocation {
+  readonly sessionID: string
+  readonly prompt: { readonly text?: string; readonly [key: string]: unknown }
+  readonly delivery?: "steer" | "queue"
+}
+
+interface CommandEditor {
+  add(command: {
+    name: string
+    description?: string
+    execute: (input: CommandInvocation) => Promise<void>
+  }): void
+}
+
 interface PluginContext {
   readonly options?: Record<string, unknown>
   readonly tool: { transform: (fn: (draft: ToolDraft) => void) => Promise<void> | void }
-  readonly session: { synthetic: (input: Record<string, unknown>) => Promise<unknown> }
+  readonly command: { transform: (fn: (editor: CommandEditor) => void) => Promise<void> | void }
+  readonly session: {
+    synthetic: (input: Record<string, unknown>) => Promise<unknown>
+    prompt: (input: Record<string, unknown>) => Promise<unknown>
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -309,6 +329,72 @@ export default {
               (delivery === "queue" ? "对方空闲时处理。" : "将在对方下一个安全点打断处理。") +
               "如有回复,会以消息形式稍后到达本会话。",
           }
+        },
+      })
+    })
+
+    // --- 斜杠命令:用户主动发起的通信入口(agent 工具目录中不存在,物理上无法误触发)---
+    await ctx.command.transform((commands: CommandEditor) => {
+      commands.add({
+        name: "ask",
+        description: "向另一个会话发问或要汇报:/ask <会话标题或id> <内容>(内容可省略,默认请求简要汇报)",
+        execute: async ({ sessionID, prompt, delivery }) => {
+          const raw = String(prompt?.text ?? "").trim()
+          let target = ""
+          let message = ""
+          if (raw.startsWith('"')) {
+            const end = raw.indexOf('"', 1)
+            if (end > 1) {
+              target = raw.slice(1, end)
+              message = raw.slice(end + 1).trim()
+            }
+          } else {
+            const sp = raw.indexOf(" ")
+            if (sp > 0) {
+              target = raw.slice(0, sp)
+              message = raw.slice(sp + 1).trim()
+            } else if (raw) {
+              target = raw
+            }
+          }
+          if (!target) {
+            await ctx.session.prompt({
+              ...prompt,
+              sessionID,
+              delivery,
+              text:
+                "[/ask 用法] /ask <会话标题或id> <内容> —— 内容可省略(默认请对方简要汇报当前进展);" +
+                '标题含空格时用引号包裹,如 /ask "某某 多词 标题" 你好',
+            })
+            return
+          }
+          if (!message) message = "请简要汇报当前进展。"
+          await ctx.session.prompt({
+            ...prompt,
+            sessionID,
+            delivery,
+            text:
+              "[用户通过 /ask 命令发起的明确通信请求]\n" +
+              `请立即用 intercom 工具向「${target}」会话发送以下消息(用户已明确授权本次发送),` +
+              "发送后把投递结果简短转告用户:\n" +
+              `${message}\n` +
+              "提示:若不确定目标 id,先用 intercom 的 action=list 按标题匹配;发送无需等待回复,对方回复会稍后自动送达本会话。",
+          })
+        },
+      })
+
+      commands.add({
+        name: "sessions",
+        description: "列出同一 OpenCode 服务里的其他会话(id、标题、目录、状态)",
+        execute: async ({ sessionID, prompt, delivery }) => {
+          await ctx.session.prompt({
+            ...prompt,
+            sessionID,
+            delivery,
+            text:
+              "[用户通过 /sessions 命令请求]请用 intercom 工具(action=list;如需看全部目录与子会话可加 all:true)" +
+              "列出会话,并把结果整理为简表展示给用户(会话 id、标题、状态)。",
+          })
         },
       })
     })

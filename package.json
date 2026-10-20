@@ -1,6 +1,6 @@
 {
   "name": "opencode-intercom",
-  "version": "0.1.0",
+  "version": "0.1.3",
   "description": "极简 OpenCode 2 跨会话通信插件:单工具、单文件、Code Mode 按需检索,几乎不占上下文。",
   "type": "module",
   "license": "MIT",
