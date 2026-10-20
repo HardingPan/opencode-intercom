@@ -194,7 +194,9 @@ export default {
           "(默认仅当前目录的顶层会话,all=true 列全部);action=read:只读获取某会话近期对话,不干扰对方" +
           "(limit 控制条数,默认 10);action=send:向某会话投递消息——对方会被唤醒并在它自己的对话里处理," +
           "回复稍后以消息形式出现在本会话,发送本身不阻塞。send 的消息需自包含(对方看不到本会话上下文)," +
-          "发送前建议先 read 对方近期对话。仅 send 有副作用。",
+          "发送前建议先 read 对方近期对话。仅 send 有副作用。" +
+          "纪律:仅当用户明确要求通信、或回复已收到的 intercom 消息时才执行 send;" +
+          "禁止未经用户指示主动向其他会话发送汇报、通知或状态更新。",
         options: { codemode: true, permission: "intercom" },
         input: {
           type: "object",
