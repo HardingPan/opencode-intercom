@@ -6,9 +6,10 @@
  *   - 工具走 Code Mode(codemode: true):不进每个会话的常驻工具目录,
  *     模型需要时通过 execute 检索调用,不用时几乎零上下文占用
  *   - 单文件、无 TUI、无线程存储、零依赖
- *   - 用户入口是斜杠命令:/ask 在命令内直接完成目标解析与投递(不经模型),
- *     /sessions 列出会话;agent 的工具目录里没有命令,物理上无法误触发
- *   - 工具的 send 仅限回信;自然语言发起的通信会被引导改用 /ask
+ *   - 用户入口是斜杠命令 /ask 与 /sessions(markdown 模板命令,安装到
+ *     ~/.config/opencode/commands/,TUI 斜杠菜单可见,保存即热生效);
+ *     发起权始终在用户手里,agent 只执行带标记的命令请求
+ *   - 工具的 send 仅限回信与执行 /ask 标记指令;自然语言发起会被引导改用 /ask
  *
  * 消息机制(参考并精简自 jmfirth/opencode-messaging,MIT):
  *   - 读:HTTP 调本机 OpenCode 服务的只读接口(会话列表 / 消息历史)
@@ -62,28 +63,10 @@ interface ToolDraft {
   }): void
 }
 
-interface CommandInvocation {
-  readonly sessionID: string
-  readonly prompt: { readonly text?: string; readonly [key: string]: unknown }
-  readonly delivery?: "steer" | "queue"
-}
-
-interface CommandEditor {
-  add(command: {
-    name: string
-    description?: string
-    execute: (input: CommandInvocation) => Promise<void>
-  }): void
-}
-
 interface PluginContext {
   readonly options?: Record<string, unknown>
   readonly tool: { transform: (fn: (draft: ToolDraft) => void) => Promise<void> | void }
-  readonly command: { transform: (fn: (editor: CommandEditor) => void) => Promise<void> | void }
-  readonly session: {
-    synthetic: (input: Record<string, unknown>) => Promise<unknown>
-    prompt: (input: Record<string, unknown>) => Promise<unknown>
-  }
+  readonly session: { synthetic: (input: Record<string, unknown>) => Promise<unknown> }
 }
 
 // ---------------------------------------------------------------------------
@@ -261,9 +244,9 @@ export default {
           "同一 OpenCode 服务内跨会话通信(对讲机)。action=list:列出其他会话(id/目录/agent/状态/标题);" +
           "action=read:只读获取某会话近期对话,不干扰对方;action=send:投递消息,对方被唤醒并在它自己的对话里" +
           "处理,回复稍后以消息形式送达本会话。send 的消息需自包含(对方看不到本会话上下文)。" +
-          "使用纪律:send 仅限回复本会话收到的 intercom 消息(按信封中的回复地址),发起通信一律由用户通过 " +
-          "/ask 命令完成;当用户用自然语言要求向某会话发消息、汇报或通知时,不要调用本工具,应回复用户请改用 " +
-          "/ask。list/read 无副作用,可按需使用。",
+          "使用纪律:send 仅限两种情况——回复本会话收到的 intercom 消息(按信封中的回复地址),或执行带有" +
+          "「[用户通过 /ask 命令发起」标记的指令;当用户用自然语言要求向某会话发消息、汇报或通知时,不要直接" +
+          "调用,应回复用户请改用 /ask 命令。list/read 无副作用,可按需使用。",
         options: { codemode: true, permission: "intercom" },
         input: {
           type: "object",
@@ -347,87 +330,5 @@ export default {
       })
     })
 
-    // --- 斜杠命令:用户主动发起的通信入口(agent 工具目录中不存在,物理上无法误触发)---
-    await ctx.command.transform((commands: CommandEditor) => {
-      commands.add({
-        name: "ask",
-        description: "向另一个会话发问或要汇报:/ask <会话标题或id> <内容>(内容可省略,默认请求简要汇报)",
-        execute: async ({ sessionID, prompt, delivery }) => {
-          const raw = String(prompt?.text ?? "").trim()
-          let target = ""
-          let message = ""
-          if (raw.startsWith('"')) {
-            const end = raw.indexOf('"', 1)
-            if (end > 1) {
-              target = raw.slice(1, end)
-              message = raw.slice(end + 1).trim()
-            }
-          } else {
-            const sp = raw.indexOf(" ")
-            if (sp > 0) {
-              target = raw.slice(0, sp)
-              message = raw.slice(sp + 1).trim()
-            } else if (raw) {
-              target = raw
-            }
-          }
-          const say = (text: string) => ctx.session.prompt({ ...prompt, sessionID, delivery, text })
-
-          if (!target) {
-            await say(
-              "[/ask 用法] /ask <会话标题或id> <内容> —— 内容可省略(默认请对方简要汇报当前进展);" +
-                '标题含空格时用引号包裹,如 /ask "某某 多词 标题" 你好。可用 /sessions 查看会话列表。',
-            )
-            return
-          }
-          if (!message) message = "请简要汇报当前进展。"
-
-          // 目标解析在命令内直接完成(不经模型):精确 id 优先,否则按标题关键词唯一匹配
-          const all = await sessions()
-          const byId = all.find((s) => s.id === target)
-          const candidates = byId
-            ? [byId]
-            : all.filter(
-                (s) => s.id !== sessionID && (s.title ?? "").toLowerCase().includes(target.toLowerCase()),
-              )
-
-          if (candidates.length === 0) {
-            await say(`[/ask] 没有匹配「${target}」的会话。可用 /sessions 查看后重试(标题关键词或会话 id)。`)
-            return
-          }
-          if (candidates.length > 1) {
-            const lines = candidates
-              .slice(0, 10)
-              .map((s) => `- ${s.id}「${s.title ?? ""}」`)
-              .join("\n")
-            await say(`[/ask]「${target}」匹配到多个会话,请用更精确的标题或会话 id 重试:\n${lines}`)
-            return
-          }
-
-          const self = all.find((s) => s.id === sessionID)
-          try {
-            const result = await deliver(ctx, accept, { sessionID, agent: self?.agent }, candidates[0].id, message)
-            await say(`[/ask] ${result}\n发送内容:${message}`)
-          } catch (error) {
-            await say(`[/ask] 发送失败:${error instanceof Error ? error.message : String(error)}`)
-          }
-        },
-      })
-
-      commands.add({
-        name: "sessions",
-        description: "列出同一 OpenCode 服务里的其他会话(id、标题、目录、状态)",
-        execute: async ({ sessionID, prompt, delivery }) => {
-          await ctx.session.prompt({
-            ...prompt,
-            sessionID,
-            delivery,
-            text:
-              "[用户通过 /sessions 命令请求]请用 intercom 工具(action=list;如需看全部目录与子会话可加 all:true)" +
-              "列出会话,并把结果整理为简表展示给用户(会话 id、标题、状态)。",
-          })
-        },
-      })
-    })
   },
 }
