@@ -6,8 +6,9 @@
  *   - 工具走 Code Mode(codemode: true):不进每个会话的常驻工具目录,
  *     模型需要时通过 execute 检索调用,不用时几乎零上下文占用
  *   - 单文件、无 TUI、无线程存储、零依赖
- *   - 用户入口是斜杠命令 /ask 与 /sessions:纯人工输入才会触发,
- *     agent 的工具目录里没有命令,物理上无法误触发
+ *   - 用户入口是斜杠命令:/ask 在命令内直接完成目标解析与投递(不经模型),
+ *     /sessions 列出会话;agent 的工具目录里没有命令,物理上无法误触发
+ *   - 工具的 send 仅限回信;自然语言发起的通信会被引导改用 /ask
  *
  * 消息机制(参考并精简自 jmfirth/opencode-messaging,MIT):
  *   - 读:HTTP 调本机 OpenCode 服务的只读接口(会话列表 / 消息历史)
@@ -194,6 +195,53 @@ const envelope = (from: SessionLike | undefined, context: SenderContext, text: s
     `[如需回复:调用 intercom 工具,action=send,session="${context.sessionID}"]`,
   ].join("\n")
 
+/** 统一投递:校验、限速、信封、注入。工具的 send 分支与 /ask 命令共用同一条路径。 */
+async function deliver(
+  ctx: PluginContext,
+  accept: string,
+  sender: { sessionID: string; agent?: string },
+  to: string,
+  text: string,
+  steer?: boolean,
+): Promise<string> {
+  if (to === sender.sessionID) throw new Error("send 不能以当前会话为目标")
+  if (!text.trim()) throw new Error("send 需要非空 text")
+
+  const all = await sessions()
+  const target = all.find((s) => s.id === to)
+  if (!target) throw new Error(`没有 id 为 ${to} 的会话——先 action=list 查最新 id`)
+  const self = all.find((s) => s.id === sender.sessionID)
+  const agent = sender.agent ?? self?.agent ?? "?"
+
+  if (accept === "none") throw new Error("插件配置 accept:none,发送已禁用")
+  if (
+    accept === "same-directory" &&
+    self &&
+    target.location?.directory !== self.location?.directory
+  )
+    throw new Error(
+      `默认策略只允许同目录发送(目标在 ${basename(target.location?.directory ?? "?")});` +
+        '插件配置 accept:"any" 可放开',
+    )
+
+  rateGate(sender.sessionID)
+  const delivery = steer ? "steer" : "queue"
+
+  await ctx.session.synthetic({
+    sessionID: to,
+    description: `intercom 来自「${self?.title ?? "?"}」(${basename(self?.location?.directory ?? "?")}/${agent})`,
+    delivery,
+    resume: true,
+    text: envelope(self, { sessionID: sender.sessionID, agent }, text),
+  })
+
+  return (
+    `已投递给 ${to} [${basename(target.location?.directory ?? "")}/${target.agent ?? "?"}],方式 ${delivery}。` +
+    (delivery === "queue" ? "对方空闲时处理。" : "将在对方下一个安全点打断处理。") +
+    "如有回复,会以消息形式稍后到达本会话。"
+  )
+}
+
 // ---------------------------------------------------------------------------
 // 插件入口
 // ---------------------------------------------------------------------------
@@ -210,13 +258,12 @@ export default {
       tools.add({
         name: "intercom",
         description:
-          "同一 OpenCode 服务内跨会话通信(对讲机)。action=list:列出其他会话,返回 id/目录/agent/状态/标题" +
-          "(默认仅当前目录的顶层会话,all=true 列全部);action=read:只读获取某会话近期对话,不干扰对方" +
-          "(limit 控制条数,默认 10);action=send:向某会话投递消息——对方会被唤醒并在它自己的对话里处理," +
-          "回复稍后以消息形式出现在本会话,发送本身不阻塞。send 的消息需自包含(对方看不到本会话上下文)," +
-          "发送前建议先 read 对方近期对话。仅 send 有副作用。" +
-          "纪律:仅当用户明确要求通信、或回复已收到的 intercom 消息时才执行 send;" +
-          "禁止未经用户指示主动向其他会话发送汇报、通知或状态更新。",
+          "同一 OpenCode 服务内跨会话通信(对讲机)。action=list:列出其他会话(id/目录/agent/状态/标题);" +
+          "action=read:只读获取某会话近期对话,不干扰对方;action=send:投递消息,对方被唤醒并在它自己的对话里" +
+          "处理,回复稍后以消息形式送达本会话。send 的消息需自包含(对方看不到本会话上下文)。" +
+          "使用纪律:send 仅限回复本会话收到的 intercom 消息(按信封中的回复地址),发起通信一律由用户通过 " +
+          "/ask 命令完成;当用户用自然语言要求向某会话发消息、汇报或通知时,不要调用本工具,应回复用户请改用 " +
+          "/ask。list/read 无副作用,可按需使用。",
         options: { codemode: true, permission: "intercom" },
         input: {
           type: "object",
@@ -291,43 +338,10 @@ export default {
             }
           }
 
-          // ---- send:投递消息并唤醒对方 ----
+          // ---- send:投递消息并唤醒对方(与 /ask 共用同一投递函数) ----
           if (!input.session) throw new Error("send 需要 session(id 来自 action=list)")
-          if (input.session === context.sessionID) throw new Error("send 不能以当前会话为目标")
-          if (!input.text?.trim()) throw new Error("send 需要非空 text")
-
-          const all = await sessions()
-          const target = all.find((s) => s.id === input.session)
-          if (!target) throw new Error(`没有 id 为 ${input.session} 的会话——先 action=list 查最新 id`)
-          const self = all.find((s) => s.id === context.sessionID)
-
-          if (accept === "none") throw new Error("插件配置 accept:none,发送已禁用")
-          if (
-            accept === "same-directory" &&
-            self &&
-            target.location?.directory !== self.location?.directory
-          )
-            throw new Error(
-              `默认策略只允许同目录发送(目标在 ${basename(target.location?.directory ?? "?")});` +
-                '插件配置 accept:"any" 可放开',
-            )
-
-          rateGate(context.sessionID)
-          const delivery = input.steer ? "steer" : "queue"
-
-          await ctx.session.synthetic({
-            sessionID: input.session,
-            description: `intercom 来自「${self?.title ?? "?"}」(${basename(self?.location?.directory ?? "?")}/${context.agent})`,
-            delivery,
-            resume: true,
-            text: envelope(self, context, input.text),
-          })
-
           return {
-            content:
-              `已投递给 ${input.session} [${basename(target.location?.directory ?? "")}/${target.agent ?? "?"}],方式 ${delivery}。` +
-              (delivery === "queue" ? "对方空闲时处理。" : "将在对方下一个安全点打断处理。") +
-              "如有回复,会以消息形式稍后到达本会话。",
+            content: await deliver(ctx, accept, { sessionID: context.sessionID, agent: context.agent }, input.session, input.text ?? "", input.steer),
           }
         },
       })
@@ -357,29 +371,46 @@ export default {
               target = raw
             }
           }
+          const say = (text: string) => ctx.session.prompt({ ...prompt, sessionID, delivery, text })
+
           if (!target) {
-            await ctx.session.prompt({
-              ...prompt,
-              sessionID,
-              delivery,
-              text:
-                "[/ask 用法] /ask <会话标题或id> <内容> —— 内容可省略(默认请对方简要汇报当前进展);" +
-                '标题含空格时用引号包裹,如 /ask "某某 多词 标题" 你好',
-            })
+            await say(
+              "[/ask 用法] /ask <会话标题或id> <内容> —— 内容可省略(默认请对方简要汇报当前进展);" +
+                '标题含空格时用引号包裹,如 /ask "某某 多词 标题" 你好。可用 /sessions 查看会话列表。',
+            )
             return
           }
           if (!message) message = "请简要汇报当前进展。"
-          await ctx.session.prompt({
-            ...prompt,
-            sessionID,
-            delivery,
-            text:
-              "[用户通过 /ask 命令发起的明确通信请求]\n" +
-              `请立即用 intercom 工具向「${target}」会话发送以下消息(用户已明确授权本次发送),` +
-              "发送后把投递结果简短转告用户:\n" +
-              `${message}\n` +
-              "提示:若不确定目标 id,先用 intercom 的 action=list 按标题匹配;发送无需等待回复,对方回复会稍后自动送达本会话。",
-          })
+
+          // 目标解析在命令内直接完成(不经模型):精确 id 优先,否则按标题关键词唯一匹配
+          const all = await sessions()
+          const byId = all.find((s) => s.id === target)
+          const candidates = byId
+            ? [byId]
+            : all.filter(
+                (s) => s.id !== sessionID && (s.title ?? "").toLowerCase().includes(target.toLowerCase()),
+              )
+
+          if (candidates.length === 0) {
+            await say(`[/ask] 没有匹配「${target}」的会话。可用 /sessions 查看后重试(标题关键词或会话 id)。`)
+            return
+          }
+          if (candidates.length > 1) {
+            const lines = candidates
+              .slice(0, 10)
+              .map((s) => `- ${s.id}「${s.title ?? ""}」`)
+              .join("\n")
+            await say(`[/ask]「${target}」匹配到多个会话,请用更精确的标题或会话 id 重试:\n${lines}`)
+            return
+          }
+
+          const self = all.find((s) => s.id === sessionID)
+          try {
+            const result = await deliver(ctx, accept, { sessionID, agent: self?.agent }, candidates[0].id, message)
+            await say(`[/ask] ${result}\n发送内容:${message}`)
+          } catch (error) {
+            await say(`[/ask] 发送失败:${error instanceof Error ? error.message : String(error)}`)
+          }
         },
       })
 
