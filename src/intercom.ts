@@ -10,6 +10,8 @@
  *     ~/.config/opencode/commands/,TUI 斜杠菜单可见,保存即热生效);
  *     发起权始终在用户手里,agent 只执行带标记的命令请求
  *   - 工具的 send 仅限回信与执行 /ask 标记指令;自然语言发起会被引导改用 /ask
+ *   - 发送动作运行时断言 intercom_send 权限(声明式权限宿主不自动强制,
+ *     插件必须自己断言):配 ask 规则即可实现「仅发送需批准,查询不弹窗」
  *
  * 消息机制(参考并精简自 jmfirth/opencode-messaging,MIT):
  *   - 读:HTTP 调本机 OpenCode 服务的只读接口(会话列表 / 消息历史)
@@ -42,6 +44,9 @@ interface SessionLike {
 interface SenderContext {
   readonly sessionID: string
   readonly agent: string
+  /** 工具调用所属消息与调用 id,权限断言的来源定位(宿主提供时存在) */
+  readonly messageID?: string
+  readonly id?: string
 }
 
 interface IntercomInput {
@@ -67,6 +72,16 @@ interface PluginContext {
   readonly options?: Record<string, unknown>
   readonly tool: { transform: (fn: (draft: ToolDraft) => void) => Promise<void> | void }
   readonly session: { synthetic: (input: Record<string, unknown>) => Promise<unknown> }
+  readonly permission: {
+    assert: (input: {
+      sessionID: string
+      agent?: string
+      source?: { type: "tool"; messageID?: string; id?: string }
+      action: string
+      resources: string[]
+      save?: string[]
+    }) => Promise<void>
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -247,7 +262,7 @@ export default {
           "使用纪律:send 仅限两种情况——回复本会话收到的 intercom 消息(按信封中的回复地址),或执行带有" +
           "「[用户通过 /ask 命令发起」标记的指令;当用户用自然语言要求向某会话发消息、汇报或通知时,不要直接" +
           "调用,应回复用户请改用 /ask 命令。list/read 无副作用,可按需使用。",
-        options: { codemode: true, permission: "intercom" },
+        options: { codemode: true, permission: "intercom_send" },
         input: {
           type: "object",
           properties: {
@@ -323,6 +338,22 @@ export default {
 
           // ---- send:投递消息并唤醒对方(与 /ask 共用同一投递函数) ----
           if (!input.session) throw new Error("send 需要 session(id 来自 action=list)")
+
+          // 折中闸门:仅发送做运行时权限断言(intercom_send),list/read 不弹窗。
+          // 声明式 options.permission 不会被宿主自动强制——插件必须自己断言。
+          if (ctx.permission?.assert) {
+            await ctx.permission.assert({
+              sessionID: context.sessionID,
+              agent: context.agent,
+              ...(context.messageID || context.id
+                ? { source: { type: "tool", messageID: context.messageID, id: context.id } }
+                : {}),
+              action: "intercom_send",
+              resources: [input.session],
+              save: [input.session],
+            })
+          }
+
           return {
             content: await deliver(ctx, accept, { sessionID: context.sessionID, agent: context.agent }, input.session, input.text ?? "", input.steer),
           }
