@@ -1,11 +1,11 @@
 {
   "name": "opencode-intercom",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "极简 OpenCode 2 会话工具集:跨会话通信(intercom)+ 零上下文定时唤醒(heartbeat)。",
   "type": "module",
   "license": "MIT",
   "scripts": {
-    "sync": "cp src/intercom.ts ~/.config/opencode/plugins/intercom.ts && cp src/heartbeat.ts ~/.config/opencode/plugins/heartbeat.ts && mkdir -p ~/.config/opencode/commands && cp commands/ask.md commands/sessions.md ~/.config/opencode/commands/",
-    "unsync": "rm -f ~/.config/opencode/plugins/intercom.ts ~/.config/opencode/plugins/heartbeat.ts ~/.config/opencode/commands/ask.md ~/.config/opencode/commands/sessions.md"
+    "sync": "cp src/intercom.ts ~/.config/opencode/plugins/intercom.ts && cp src/heartbeat.ts ~/.config/opencode/plugins/heartbeat.ts && cp scripts/beat.py ~/.config/opencode/beat.py && mkdir -p ~/.config/opencode/commands && cp commands/ask.md commands/sessions.md commands/beat.md ~/.config/opencode/commands/",
+    "unsync": "rm -f ~/.config/opencode/plugins/intercom.ts ~/.config/opencode/plugins/heartbeat.ts ~/.config/opencode/beat.py ~/.config/opencode/commands/ask.md ~/.config/opencode/commands/sessions.md ~/.config/opencode/commands/beat.md"
   }
 }

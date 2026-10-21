@@ -120,8 +120,24 @@ TUI 斜杠菜单直接可见、保存即热生效。`$1` 是目标(含空格可�
 | `text` | 唤醒时注入的指令,需自包含 |
 | `enabled` | `false` 暂停该条,默认 `true` |
 
-管理方式:对任一会话里的 agent 说(「给 XX 会话挂每 20 分钟的检查」),
-或直接编辑文件。运行记录:`~/.config/opencode/heartbeat.log`。
+管理方式(与 /ask 同构,**只能由人工触发**):
+- `/beat` 斜杠命令——其 shell 块在命令求值期执行,不经 agent 的工具权限流,
+  agent 无法模拟:
+  - `/beat` 查看全部调度
+  - `/beat add 30m 会话标题或id 指令文本` 添加
+  - `/beat off 2` / `/beat on 2` 暂停/恢复
+  - `/beat rm 2` 删除
+- 用户直接编辑 `heartbeat.json`
+- 建议同时配置硬闸,阻止 agent 用文件工具改调度:
+
+```jsonc
+{ "permissions": [
+  { "action": "edit", "resource": "~/.config/opencode/heartbeat.json", "effect": "deny" },
+  { "action": "write", "resource": "~/.config/opencode/heartbeat.json", "effect": "deny" }
+] }
+```
+
+运行记录:`~/.config/opencode/heartbeat.log`。
 
 注意:每次唤醒都会让目标会话真实跑一轮模型(消耗 token),频率按需设置;
 服务重启后从「当前时刻 + 间隔」重新起算;目标会话忙时消息排队等它空闲。
