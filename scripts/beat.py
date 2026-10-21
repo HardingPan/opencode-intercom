@@ -75,11 +75,16 @@ def main() -> None:
 
     if not args or args[0] in ("list", "ls"):
         if not beats:
-            print("(当前没有任何调度。添加:/beat add <间隔> <会话> <指令>)")
-            return
-        for i, b in enumerate(beats, 1):
-            state = "启用" if b.get("enabled", True) else "暂停"
-            print(f"{i}. [{state}] 每 {b.get('every')} → {str(b.get('session'))[:20]} | {str(b.get('text'))[:36]}")
+            print("(当前没有任何调度)")
+        else:
+            for i, b in enumerate(beats, 1):
+                state = "启用" if b.get("enabled", True) else "暂停"
+                print(f"{i}. [{state}] 每 {b.get('every')} → {str(b.get('session'))[:20]} | {str(b.get('text'))[:36]}")
+        print()
+        print("用法:")
+        print("  /beat add <间隔> <会话标题或id> <指令文本>    添加调度")
+        print("  /beat off <序号> / on <序号> / rm <序号>       暂停 / 恢复 / 删除")
+        print("间隔写法:数字+m/h,如 5m、30m、2h")
         return
 
     cmd = args[0]
